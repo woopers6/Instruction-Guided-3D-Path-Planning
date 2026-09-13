@@ -289,9 +289,187 @@ def _print_ladder(rows):
                 np.nanmean([r["k2_climb_clear"] for r in rs])))
 
 
+def figures():
+    """Paper figures from the Austin data: tile map, example paths, no-network ladder, trained models."""
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Rectangle
+
+    from .multiseed import matrix, stats
+    from .paths import FIGURES
+    from .viz import AXIS, INK, INK2, dot_whisker
+
+    written = []
+    blue, orange, aqua = "#2a78d6", "#eb6834", "#1baf7a"
+
+    def save(fig, name):
+        out = FIGURES / (name + ".png")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out, dpi=300)
+        fig.savefig(out.with_suffix(".pdf"))
+        plt.close(fig)
+        written.append(out)
+
+    def tidy(ax, xlabel, ylabel):
+        ax.tick_params(colors=INK2, labelsize=7, length=0)
+        for s in ax.spines.values():
+            s.set_color(AXIS)
+        ax.set_xlabel(xlabel, fontsize=7.5, color=INK2)
+        ax.set_ylabel(ylabel, fontsize=7.5, color=INK2)
+
+    km = VOXEL_M / 1000.0
+    top, covered, _ = surface()
+    blocks = json.loads(blocks_path().with_suffix(".json").read_text())["blocks"]
+    used = [b for b in blocks if b["used"]]
+    rel = (top - np.percentile(top[covered], 1)).astype(float)
+    rel[~covered] = np.nan
+    cmap = plt.get_cmap("Blues").copy()
+    cmap.set_bad("#f0efec")
+    fig, ax = plt.subplots(figsize=(3.5, 4.2))
+    im = ax.imshow(rel, origin="lower", cmap=cmap, vmin=0, vmax=float(np.nanpercentile(rel, 99.9)),
+                   extent=(0, top.shape[1] * km, 0, top.shape[0] * km), interpolation="nearest")
+    side = SIZE * km
+    for b in blocks:
+        bi, bj = b["block"]
+        ax.add_patch(Rectangle((bj * side, bi * side), side, side, fill=False,
+                               lw=0.6 if b["used"] else 1.0, edgecolor=INK2 if b["used"] else INK,
+                               ls="-" if b["used"] else (0, (2, 2))))
+    tidy(ax, "east (km)", "north (km)")
+    ax.set_title("Downtown Austin\nUSGS 3DEP aerial LiDAR", fontsize=8.5, color=INK, loc="left")
+    cb = fig.colorbar(im, ax=ax, shrink=0.75, pad=0.03)
+    cb.set_label("surface height above lowest ground (m)", fontsize=7, color=INK2)
+    cb.ax.tick_params(labelsize=6.5, colors=INK2, length=0)
+    cb.outline.set_visible(False)
+    ax.legend(handles=[Line2D([], [], color=INK2, lw=0.6,
+                              label="{} blocks used, 192 m each".format(len(used))),
+                       Line2D([], [], color=INK, lw=1.0, ls=(0, (2, 2)),
+                              label="{} skipped, under 95% covered".format(len(blocks) - len(used)))],
+              loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=1, frameon=False, fontsize=6.5,
+              labelcolor=INK)
+    fig.tight_layout()
+    save(fig, "austin_tile")
+
+    vols = load_blocks()
+    cfg = DEFAULT.cost
+    pairs = (("level", "shortest", "vertical"), ("low", "high", "mean_alt"))
+    chosen = None
+    for b in used:
+        v = vols[b["index"]]
+        G = GridGraph(v.occ)
+        f = volume_features(v, cfg)
+        plans = {c: G.plan(gt_field_from_features(v.occ, f, c, cfg, 3), v.start, v.goal)[0]
+                 for c in ("level", "shortest", "low", "high")}
+        beh = {c: behaviour(v, p, f["edt"]) for c, p in plans.items()}
+        if all(abs(beh[x][m] - beh[y][m]) > 1e-6 for x, y, m in pairs):
+            chosen = (b, v, plans, beh)
+            break
+    if chosen is None:
+        raise SystemExit("no block where both contrasts differ")
+    b, v, plans, beh = chosen
+    surf = v.occ[:-1].sum(axis=0)
+    names = {"level": '"keep it level"', "shortest": '"shortest path"', "low": '"stay low"',
+             "high": '"stay high"'}
+    lo_m, hi_m = BORDER * VOXEL_M, (SIZE - BORDER) * VOXEL_M
+    def draw_pair(ax_top, ax_prof, x_cls, y_cls, m):
+        ax_top.imshow(surf[BORDER:-BORDER, BORDER:-BORDER] * VOXEL_M, origin="lower", cmap="Greys",
+                      vmin=0, vmax=float(surf[BORDER:-BORDER, BORDER:-BORDER].max() * VOXEL_M),
+                      extent=(lo_m, hi_m, lo_m, hi_m), interpolation="nearest")
+        for cls, colour, ls in ((x_cls, blue, "-"), (y_cls, orange, (0, (3, 1.5)))):
+            p = np.asarray(plans[cls], float)
+            ax_top.plot((p[:, 2] + 0.5) * VOXEL_M, (p[:, 1] + 0.5) * VOXEL_M, color=colour, lw=1.8,
+                        ls=ls, label=names[cls])
+            step = np.hypot(np.diff(p[:, 1]), np.diff(p[:, 2])) * VOXEL_M
+            dist = np.concatenate([[0.0], np.cumsum(step)])
+            under = surf[p[:, 1].astype(int), p[:, 2].astype(int)] * VOXEL_M
+            ax_prof.fill_between(dist, 0, under, color=colour, alpha=0.15, lw=0, step="mid")
+            ax_prof.plot(dist, (p[:, 0] + 0.5) * VOXEL_M, color=colour, lw=1.8, ls=ls)
+        ax_top.plot((v.start[2] + 0.5) * VOXEL_M, (v.start[1] + 0.5) * VOXEL_M, "o", color=INK, ms=4)
+        ax_top.plot((v.goal[2] + 0.5) * VOXEL_M, (v.goal[1] + 0.5) * VOXEL_M, "*", color=INK, ms=8)
+        if m == "vertical":
+            detail = "vertical travel {:.0f} m vs {:.0f} m".format(
+                beh[x_cls][m] * VOXEL_M, beh[y_cls][m] * VOXEL_M)
+        else:
+            detail = "mean altitude {:.0f} m vs {:.0f} m".format(
+                (beh[x_cls][m] * (SIZE - 1) + 0.5) * VOXEL_M,
+                (beh[y_cls][m] * (SIZE - 1) + 0.5) * VOXEL_M)
+        ax_top.set_title("{} vs {}\n{}".format(names[x_cls], names[y_cls], detail), fontsize=8,
+                         color=INK, loc="left", pad=18)
+        ax_top.legend(loc="lower left", bbox_to_anchor=(0, 1.0), ncol=2, frameon=False, fontsize=7,
+                      labelcolor=INK, handlelength=2.2)
+        tidy(ax_top, "east (m)", "north (m)")
+        tidy(ax_prof, "distance along the path (m)", "altitude (m)")
+        ax_prof.set_xlim(left=0)
+        ax_prof.set_ylim(bottom=0)
+
+    fig, axes = plt.subplots(2, 2, figsize=(7.16, 6.4), gridspec_kw=dict(height_ratios=(2.3, 1)))
+    for col, (x_cls, y_cls, m) in enumerate(pairs):
+        draw_pair(axes[0, col], axes[1, col], x_cls, y_cls, m)
+    fig.text(0.01, 0.022, "block ({}, {}): the first used block in scan order where both pairs of "
+             "paths differ. Exact planner on the true cost fields, no network.".format(*b["block"]),
+             fontsize=6.5, color=INK2)
+    fig.text(0.01, 0.005, "Top: surface height, darker = taller; dot = start, star = goal. "
+             "Bottom: altitude along each path, surface beneath it shaded in the same colour.",
+             fontsize=6.5, color=INK2)
+    fig.tight_layout(rect=(0, 0.045, 1, 1))
+    save(fig, "austin_paths")
+
+    fig, (ax_top, ax_prof) = plt.subplots(2, 1, figsize=(3.5, 4.9),
+                                          gridspec_kw=dict(height_ratios=(2.3, 1)))
+    draw_pair(ax_top, ax_prof, *pairs[0])
+    fig.tight_layout()
+    save(fig, "austin_paths_level")
+
+    rows = json.loads((OUT / "ladder.json").read_text())
+    everyone = sorted({r["vol"] for r in rows})
+    climbs = sorted({r["vol"] for r in rows if r["shortest_vertical"] > 0})
+    held, style = {}, {}
+    for tag, scope in (("all", set(everyone)), ("climb", set(climbs))):
+        for k, label, colour, marker in (("k1", "best scalar map (K=1)", orange, "s"),
+                                         ("k2", "best 2-channel map (K=2)", aqua, "D")):
+            name = "{}_{}".format(k, tag)
+            style[name] = (label, colour, marker)
+            held[name] = {"regret": {}}
+            for cls in list(REAL_CLASSES) + ["MEAN"]:
+                cl = list(REAL_CLASSES) if cls == "MEAN" else [cls]
+                by = {}
+                for r in rows:
+                    if r["cls"] in cl and r["vol"] in scope:
+                        by.setdefault(r["vol"], []).append(r["regret_" + k])
+                held[name]["regret"][cls] = stats(np.array([[np.mean(by[i]) for i in sorted(by)]]))
+    panels = (("(a) all {} Austin blocks".format(len(everyone)), ("k1_all", "k2_all")),
+              ("(b) the {} blocks where the shortest path climbs".format(len(climbs)),
+               ("k1_climb", "k2_climb")))
+    out = dot_whisker(held, REAL_CLASSES, panels,
+                      "marker: mean over blocks   bar: 95% CI over blocks   best K=1/K=2 map scored "
+                      "under the true K=3 field (which scores 0); no network",
+                      FIGURES / "austin_ladder.png", key="regret", style=style,
+                      figsize=(7.16, 3.3), bottom=0.12)
+    written.append(out)
+
+    data = {}
+    for fp in sorted(OUT.glob("e1_held_*_s*.json")):
+        d = json.loads(fp.read_text())
+        data.setdefault(d["name"], {})[d["seed"]] = d["rows"]
+    held = {m: {"grid_regret": {cls: stats(matrix(by, "grid_regret",
+                                                  list(REAL_CLASSES) if cls == "MEAN" else [cls]))
+                                for cls in list(REAL_CLASSES) + ["MEAN"]}}
+            for m, by in data.items()}
+    ref = held["k3_onehot"]["grid_regret"]["MEAN"]
+    panels = (("(a) expressiveness, language given", ("k1_onehot", "k2_onehot", "k3_onehot")),
+              ("(b) conditioning, new wording", ("k3_onehot", "k3_nli", "k3_nli_adapter",
+                                                 "k3_embedding")))
+    out = dot_whisker(held, REAL_CLASSES, panels,
+                      "marker: mean of {} training seeds    bar: 95% bootstrap CI over {} Austin blocks"
+                      "    trained on synthetic worlds only; exact grid planner".format(
+                          ref["n_seeds"], ref["n_vols"]),
+                      FIGURES / "austin_regret.png", figsize=(7.16, 3.9), bottom=0.13)
+    written.append(out)
+    return written
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("what", choices=["build", "ladder", "eval", "eval-one", "report"])
+    ap.add_argument("what", choices=["build", "ladder", "eval", "eval-one", "report", "figures"])
     ap.add_argument("--models", nargs="*", default=None)
     ap.add_argument("--seeds", nargs="*", type=int, default=[0, 1, 2])
     ap.add_argument("--workers", type=int, default=4)
@@ -301,6 +479,10 @@ def main(argv=None):
     a = ap.parse_args(argv)
     sys.stdout.reconfigure(encoding="utf-8")
     warnings.filterwarnings("ignore", message="Mean of empty slice")
+    if a.what == "figures":
+        for p in figures():
+            print("wrote " + str(p))
+        return
     if a.what == "build":
         vols, meta, info = build()
         used = [b for b in info if b["used"]]

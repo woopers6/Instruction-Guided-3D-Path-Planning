@@ -8,6 +8,8 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")
+matplotlib.rcParams["pdf.fonttype"] = 42
+matplotlib.rcParams["ps.fonttype"] = 42
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 from matplotlib.patches import Rectangle  # noqa: E402
@@ -148,19 +150,17 @@ MODEL_STYLE = {
 INK, INK2, GRID, AXIS = "#0b0b0b", "#52514e", "#e1e0d9", "#c3c2b7"
 
 
-def errorbars(out=None, key="grid_regret"):
-    """Regret per class, mean of 3 seeds (marker) with 95% CI over test volumes (bar)."""
-    rep = json.loads((RESULTS / "multiseed" / "report.json").read_text())
-    held = rep["held"]
-    panels = (("(a) expressiveness, language given", ("k1_onehot", "k2_onehot", "k3_onehot")),
-              ("(b) conditioning, new wording", ("k3_onehot", "k3_nli", "k3_nli_adapter",
-                                                 "k3_embedding")))
-    rows = list(CLASSES) + ["MEAN"]
-    fig, axes = plt.subplots(1, 2, figsize=(7.16, 4.2), sharey=True)
+def dot_whisker(held, classes, panels, footer, out, key="grid_regret", style=None,
+                figsize=(7.16, 4.2), bottom=0.11, xlabel="regret vs optimal path, %"):
+    """Mean (marker) and 95% CI (bar) per class, one panel per group of series."""
+    style = style or MODEL_STYLE
+    rows = list(classes) + ["MEAN"]
+    fig, axes = plt.subplots(1, len(panels), figsize=figsize, sharey=True)
+    axes = np.atleast_1d(axes)
     for ax, (title, models) in zip(axes, panels):
         models = [m for m in models if m in held]
         for j, m in enumerate(models):
-            lab, col, mk = MODEL_STYLE[m]
+            lab, col, mk = style[m]
             for i, cls in enumerate(rows):
                 st = held[m][key][cls]
                 y = i + (j - (len(models) - 1) / 2) * 0.19
@@ -168,7 +168,7 @@ def errorbars(out=None, key="grid_regret"):
                         solid_capstyle="round", zorder=2)
                 ax.plot(100 * st["mean"], y, marker=mk, color=col, ms=4.8, mec="white",
                         mew=0.7, ls="", zorder=3, label=lab if i == 0 else None)
-        ax.axhline(len(CLASSES) - 0.5, color=AXIS, lw=0.8)
+        ax.axhline(len(classes) - 0.5, color=AXIS, lw=0.8)
         ax.set_title(title, fontsize=8.5, color=INK, loc="left")
         ax.set_xlim(left=0)
         ax.grid(axis="x", color=GRID, lw=0.6, zorder=0)
@@ -178,10 +178,10 @@ def errorbars(out=None, key="grid_regret"):
             ax.spines[s].set_visible(False)
         for s in ("left", "bottom"):
             ax.spines[s].set_color(AXIS)
-        ax.set_xlabel("regret vs optimal path, %", fontsize=7.5, color=INK2)
+        ax.set_xlabel(xlabel, fontsize=7.5, color=INK2)
     axes[0].set_yticks(range(len(rows)))
-    axes[0].set_yticklabels(["{}  (T{})".format(c.replace("_", " "), TIER[c]) for c in CLASSES]
-                            + ["mean of 8"])
+    axes[0].set_yticklabels(["{}  (T{})".format(c.replace("_", " "), TIER[c]) for c in classes]
+                            + ["mean of {}".format(len(classes))])
     axes[0].invert_yaxis()
     handles = {}
     for ax in axes:
@@ -190,18 +190,27 @@ def errorbars(out=None, key="grid_regret"):
     fig.legend(handles.values(), handles.keys(), loc="lower center", ncol=3, frameon=False,
                fontsize=7, labelcolor=INK, handletextpad=0.3, columnspacing=1.2,
                bbox_to_anchor=(0.5, 0.035))
-    ref = held["k3_onehot"][key]["MEAN"]
-    fig.text(0.01, 0.005, "marker: mean of {} training seed{}    bar: 95% bootstrap CI over "
-             "{} unseen test volumes    exact grid planner on the predicted field".format(
-                 ref["n_seeds"], "s" if ref["n_seeds"] > 1 else "", ref["n_vols"]),
-             fontsize=6.5, color=INK2)
-    fig.tight_layout(rect=(0, 0.11, 1, 1))
-    out = Path(out or FIGURES / "multiseed_regret.png")
+    fig.text(0.01, 0.005, footer, fontsize=6.5, color=INK2)
+    fig.tight_layout(rect=(0, bottom, 1, 1))
+    out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out, dpi=200)
+    fig.savefig(out, dpi=300)
     fig.savefig(out.with_suffix(".pdf"))
     plt.close(fig)
     return out
+
+
+def errorbars(out=None, key="grid_regret"):
+    """Regret per class, mean of 3 seeds (marker) with 95% CI over test volumes (bar)."""
+    held = json.loads((RESULTS / "multiseed" / "report.json").read_text())["held"]
+    panels = (("(a) expressiveness, language given", ("k1_onehot", "k2_onehot", "k3_onehot")),
+              ("(b) conditioning, new wording", ("k3_onehot", "k3_nli", "k3_nli_adapter",
+                                                 "k3_embedding")))
+    ref = held["k3_onehot"][key]["MEAN"]
+    footer = ("marker: mean of {} training seed{}    bar: 95% bootstrap CI over "
+              "{} unseen test volumes    exact grid planner on the predicted field").format(
+        ref["n_seeds"], "s" if ref["n_seeds"] > 1 else "", ref["n_vols"])
+    return dot_whisker(held, CLASSES, panels, footer, out or FIGURES / "multiseed_regret.png", key)
 
 
 def main(argv=None):
