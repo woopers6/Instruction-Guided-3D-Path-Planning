@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import os
 
-# never download models on this machine (government rule: no Chinese/CCP-affiliated models)
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
